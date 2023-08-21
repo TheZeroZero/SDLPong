@@ -1,0 +1,653 @@
+#include <SDL.h>
+#include <SDL_image.h>
+#include <SDL_ttf.h>
+#include <stdio.h>
+#include <string>
+#include <random>
+
+
+//random
+namespace Random // capital R to avoid conflicts with functions named random()
+{
+	std::mt19937 mt{ std::random_device{}() };
+
+	int get(int min, int max)
+	{
+		std::uniform_int_distribution<> die{ min, max }; // we can create a distribution in any function that needs it
+		return die(mt); // and then generate a random number from our global generator
+	}
+}
+
+const int SCREEN_WIDTH = 1000;
+const int SCREEN_HEIGHT = 600;
+const int FONT_SIZE = 72;
+const int WINNING_SCORE = 10;
+
+class Texture
+{
+public:
+	Texture();
+	~Texture();
+
+	bool loadFromFile(std::string path);
+
+#if defined(SDL_TTF_MAJOR_VERSION)
+	bool loadFromRenderedText(std::string textureText, SDL_Color textColor);
+#endif
+
+	void free();
+	/*
+	void setColor(Uint8 red, Uint8 green, Uint8 blue);
+	void setBlendMode(SDL_BlendMode blending);
+	void setAlpha(Uint8 alpha);
+	*/
+
+	void render(int x, int y, SDL_Rect* clip = NULL, double angle = 0.0, SDL_Point* center = NULL, SDL_RendererFlip flip = SDL_FLIP_NONE);
+
+	int getWidth();
+	int getHeight();
+private:
+	int m_w, m_h;
+	SDL_Texture* m_texture;
+};
+
+struct Circle
+{
+	double x, y;
+	double r;
+};
+
+double distanceSquared(double x1, double y1, double x2, double y2)
+{
+	return (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+}
+
+bool collisionCircleRect(Circle circle, SDL_Rect rect)
+{
+	double closestX = 0;
+	if(circle.x < rect.x)
+	{
+		closestX = rect.x;
+	}
+	else if(circle.x > rect.x + rect.w)
+	{
+		closestX = rect.x + rect.w;
+	}
+	else
+	{
+		closestX = circle.x;
+	}
+	double closestY = 0;
+	if(circle.y < rect.y)
+	{
+		closestY = rect.y;
+	}
+	else if(circle.y > rect.y + rect.h)
+	{
+		closestY = rect.y + rect.h;
+	}
+	else
+	{
+		closestY = circle.y;
+	}
+
+	return distanceSquared(circle.x, circle.y, closestX, closestY) < circle.r * circle.r;
+}
+
+int sgn(double val)
+{
+	return (0 < val) - (val < 0);
+}
+
+bool init();
+
+bool loadMedia();
+
+void close();
+
+SDL_Window* g_window = NULL;
+SDL_Renderer* g_renderer = NULL;
+TTF_Font* g_font = NULL;
+
+Texture g_scoreTextTexture;
+Texture g_assetsTexture;
+enum Assets
+{
+	platform,
+	ball,
+	max_assets
+};
+SDL_Rect g_assetsRects[ max_assets ];
+
+const int PLATFORM_STR = 1;
+const int PLATFORM_VEL = 4;
+class Platform
+{
+public:
+	Platform(double x1 = 0, double y1 = 0);
+	~Platform();
+
+	void calculateMove(double ballY);
+	void checkEvent(SDL_Event& e);
+	void move();
+
+	SDL_Rect getRect();
+	SDL_Rect& getAssetRect() { return g_assetsRects[ platform ]; }
+
+	double x, y;
+private:
+	double m_velY;
+};
+
+Platform::Platform(double x1, double y1)
+{
+	x = x1;
+	y = y1;
+	m_velY = 0;
+}
+
+Platform::~Platform()
+{}
+
+void Platform::calculateMove(double ballY)
+{
+	if(y + getAssetRect().h / 2 < ballY)
+		m_velY = PLATFORM_VEL;
+	else if(y + getAssetRect().h / 2 > ballY)
+		m_velY = -PLATFORM_VEL;
+	else
+		m_velY = 0;
+}
+
+void Platform::checkEvent(SDL_Event& e)
+{
+	//m_velY = 0;
+	if(e.type == SDL_KEYDOWN && e.key.repeat == 0)
+	{
+		if(e.key.keysym.sym == SDLK_UP)
+			m_velY = m_velY - PLATFORM_VEL; //move up
+		if(e.key.keysym.sym == SDLK_DOWN)
+			m_velY = m_velY + PLATFORM_VEL; //move down
+	}
+	if(e.type == SDL_KEYUP && e.key.repeat == 0)
+	{
+		if(e.key.keysym.sym == SDLK_UP)
+			m_velY = m_velY + PLATFORM_VEL; //reset move up
+		if(e.key.keysym.sym == SDLK_DOWN)
+			m_velY = m_velY - PLATFORM_VEL; //reset move down
+	}
+}
+
+void Platform::move()
+{
+	y = y + m_velY;
+	if(y < 0)
+		y = y - m_velY;
+	else if(y + getAssetRect().h > SCREEN_HEIGHT)
+		y = y - m_velY;
+}
+
+SDL_Rect Platform::getRect()
+{
+	SDL_Rect rect;
+	rect.x = x;
+	rect.y = y;
+	rect.w = getAssetRect().w;
+	rect.h = getAssetRect().h;
+
+	return rect;
+}
+
+enum Scores
+{
+	noOneScores,
+	AIScores,
+	playerScores,
+	max_scores
+};
+const int BALL_SPEED_UP_AT_BOUNCES = 1; //after how many bounces should the ball speed up
+const double BALL_SPEED_UP = 0.5; //how much should the ball speed up
+class Ball
+{
+public:
+	Ball();
+	~Ball();
+
+	void move();
+	Scores checkCollisions(Platform AI, Platform player);
+	void reset();
+
+	SDL_Rect& getAssetRect() { return g_assetsRects[ ball ]; }
+	double getX() { return m_circle.x; }
+	double getY() { return m_circle.y; }
+	int getRadius() { return m_circle.r; }
+private:
+	Circle m_circle;
+	double m_velX;
+	double m_velY;
+	int bounces;
+};
+
+Ball::Ball()
+{
+	reset();
+}
+
+Ball::~Ball()
+{
+}
+
+void Ball::reset()
+{
+	bounces = 0;
+	m_circle.x = SCREEN_WIDTH / 2;
+	m_circle.y = SCREEN_HEIGHT / 2;
+	m_circle.r = g_assetsRects[ ball ].w / 2;
+	do{
+	m_velX = Random::get(-3, 3) * PLATFORM_STR;
+	m_velY = Random::get(-3, 3) * PLATFORM_STR;
+	} while(m_velX == 0);
+
+}
+
+void Ball::move()
+{
+	m_circle.x = m_circle.x + m_velX;
+	m_circle.y = m_circle.y + m_velY;
+}
+
+Scores Ball::checkCollisions(Platform AI, Platform player)
+{
+	Scores scores;
+	//X collisions with borders
+	if(m_circle.x - m_circle.r < 0)
+	{
+		reset();
+		scores = playerScores;
+	}
+	else if(m_circle.x + m_circle.r > SCREEN_WIDTH)
+	{
+		reset();
+		scores = AIScores;
+	}
+	else
+	{
+		scores = noOneScores;
+	}
+	//Y collisions with borders
+	if(m_circle.y - m_circle.r < 0 || m_circle.y + m_circle.r > SCREEN_HEIGHT)
+	{
+		m_circle.y = m_circle.y - m_velY;
+		m_velY = -m_velY;
+	}
+	//Collisions with platforms
+	if(collisionCircleRect(m_circle, AI.getRect()))
+	{
+		m_circle.x = m_circle.x - m_velX;
+		m_velX = -m_velX;
+		if(bounces >= BALL_SPEED_UP_AT_BOUNCES)
+		{
+			m_velX = m_velX + sgn(m_velX) * BALL_SPEED_UP;
+			bounces = 0;
+		}
+
+		double deltaY = m_circle.y - AI.y;
+		if(deltaY < 20)
+			m_velY = m_velY - 3 * PLATFORM_STR;
+		else if(deltaY < 40)
+			m_velY = m_velY - 2 * PLATFORM_STR;
+		else if(deltaY < 60)
+			m_velY = m_velY - 1 * PLATFORM_STR;
+		else if(deltaY < 80)
+			m_velY;
+		else if(deltaY < 100)
+			m_velY = m_velY + 1 * PLATFORM_STR;
+		else if(deltaY < 120)
+			m_velY = m_velY + 2 * PLATFORM_STR;
+		else
+			m_velY = m_velY + 3 * PLATFORM_STR;
+
+		bounces = bounces + 1;
+	}
+	else if(collisionCircleRect(m_circle, player.getRect()))
+	{
+		m_circle.x = m_circle.x - m_velX;
+		m_velX = -m_velX;
+		if(bounces >= BALL_SPEED_UP_AT_BOUNCES)
+		{
+			m_velX = m_velX + sgn(m_velX) * BALL_SPEED_UP;
+			bounces = 0;
+		}
+
+		double deltaY = m_circle.y - player.y;
+		if(deltaY < 20)
+			m_velY = m_velY - 3 * PLATFORM_STR;
+		else if(deltaY < 40)
+			m_velY = m_velY - 2 * PLATFORM_STR;
+		else if(deltaY < 60)
+			m_velY = m_velY - 1 * PLATFORM_STR;
+		else if(deltaY < 80)
+			m_velY;
+		else if(deltaY < 100)
+			m_velY = m_velY + 1 * PLATFORM_STR;
+		else if(deltaY < 120)
+			m_velY = m_velY + 2 * PLATFORM_STR;
+		else
+			m_velY = m_velY + 3 * PLATFORM_STR;
+
+		bounces = bounces + 1;
+	}
+
+	printf("Ball\n");
+	printf("Ball velx, vely: %f,\t%f\n", m_velX, m_velY);
+	return scores;
+}
+
+Texture::Texture()
+{
+	m_w = 0;
+	m_h = 0;
+	m_texture = NULL;
+}
+
+Texture::~Texture()
+{
+	free();
+}
+
+void Texture::free()
+{
+	SDL_DestroyTexture(m_texture);
+	m_texture = NULL;
+}
+
+bool Texture::loadFromFile(std::string path)
+{
+	free();
+
+	SDL_Texture* newTexture = NULL;
+	SDL_Surface* loadedSurface = IMG_Load(path.c_str());
+	if(loadedSurface == NULL)
+	{
+		printf("Couldn't load from image %s! SDL_image Error: %s\n", path.c_str(), IMG_GetError());
+	}
+	else
+	{
+		SDL_SetColorKey(loadedSurface, SDL_TRUE, SDL_MapRGB(loadedSurface->format, 0x0, 0xFF, 0xFF));
+		newTexture = SDL_CreateTextureFromSurface(g_renderer, loadedSurface);
+		if(newTexture == NULL)
+		{
+			printf("Couldn't create a texture from surface %s! SDL Error: %s\n", path.c_str(), SDL_GetError());
+		}
+		else
+		{
+			m_w = loadedSurface->w;
+			m_h = loadedSurface->h;
+		}
+
+		SDL_FreeSurface(loadedSurface);
+	}
+
+	m_texture = newTexture;
+	return m_texture != NULL;
+}
+
+#if defined(SDL_TTF_MAJOR_VERSION)
+bool Texture::loadFromRenderedText(std::string textureText, SDL_Color textColor)
+{
+	free();
+
+	SDL_Surface* textSurface = TTF_RenderText_Solid(g_font, textureText.c_str(), textColor);
+	if(textSurface == NULL)
+	{
+		printf("Couldn't create surface from text! STD_ttf Error: %s\n", TTF_GetError());
+	}
+	else
+	{
+		m_texture = SDL_CreateTextureFromSurface(g_renderer, textSurface);
+		if(m_texture == NULL)
+		{
+			printf("Couldn't create a texture from surface text! SDL Error: %s\n", SDL_GetError());
+		}
+		else
+		{
+			m_w = textSurface->w;
+			m_h = textSurface->h;
+		}
+
+		SDL_FreeSurface(textSurface);
+	}
+
+	return m_texture != NULL;
+}
+#endif
+
+void Texture::render(int x, int y, SDL_Rect* clip, double angle, SDL_Point* center, SDL_RendererFlip flip)
+{
+	SDL_Rect renderQuad = { x, y, m_w, m_h };
+	if(clip != NULL)
+	{
+		renderQuad.w = clip->w;
+		renderQuad.h = clip->h;
+	}
+
+	SDL_RenderCopyEx(g_renderer, m_texture, clip, &renderQuad, angle, center, flip);
+}
+
+int Texture::getWidth()
+{
+	return m_w;
+}
+
+int Texture::getHeight()
+{
+	return m_h;
+}
+
+bool init()
+{
+	bool success = true;
+	if(SDL_Init(SDL_INIT_VIDEO) < 0)
+	{
+		printf("Couldn't initialise SDL! SDL Error: %s!\n", SDL_GetError());
+		success = false;
+	}
+	else
+	{
+		if(!SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1"))
+		{
+			printf("Warning: Linear texture filtering not enabled\n");
+		}
+		g_window = SDL_CreateWindow("Pong!", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+		if(g_window == NULL)
+		{
+			printf("Couldn't create a window! SDL Error: %s", SDL_GetError());
+			success = false;
+		}
+		else
+		{
+			g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+			if(g_renderer == NULL)
+			{
+				printf("Couldn't create renderer! SDL Error: %s\n", SDL_GetError());
+				success = false;
+			}
+			else
+			{
+				SDL_SetRenderDrawColor(g_renderer, 0xFF, 0xFF, 0xFF, 0xFF);
+
+				int imgFlags = IMG_INIT_PNG;
+				if(!( IMG_Init(imgFlags) & imgFlags ))
+				{
+					printf("Couldn't initialize SDL_image! SDL_image Error: %s\n", IMG_GetError());
+					success = false;
+				}
+
+				if(TTF_Init() == -1)
+				{
+					printf("Couldn't initialize SDL_ttf! SDL_ttf Error: %s\n", TTF_GetError());
+					success = false;
+				}
+			}
+		}
+	}
+
+	return success;
+}
+
+bool loadMedia()
+{
+	bool success = true;
+
+	g_font = TTF_OpenFont("Apple ][.ttf", FONT_SIZE);
+	if(g_font == NULL)
+	{
+		printf("Couldn't open font! SDL_ttf Error: %s\n", TTF_GetError());
+		success = false;
+	}
+
+	if(!g_assetsTexture.loadFromFile("assets.png"))
+	{
+		printf("Couldn't load assets!\n");
+	}
+	else
+	{
+		g_assetsRects[ platform ].x = 0;
+		g_assetsRects[ platform ].y = 0;
+		g_assetsRects[ platform ].w = 20;
+		g_assetsRects[ platform ].h = 140;
+
+		g_assetsRects[ ball ].x = 20;
+		g_assetsRects[ ball ].y = 0;
+		g_assetsRects[ ball ].w = 20;
+		g_assetsRects[ ball ].h = 20;
+	}
+
+	return success;
+}
+
+void close()
+{
+	g_scoreTextTexture.free();
+	g_assetsTexture.free();
+
+	TTF_CloseFont(g_font);
+	g_font = NULL;
+
+	SDL_DestroyRenderer(g_renderer);
+	g_renderer = NULL;
+	SDL_DestroyWindow(g_window);
+	g_window = NULL;
+
+	TTF_Quit();
+	IMG_Quit();
+	SDL_Quit();
+}
+
+
+int main(int argc, char* argv[])
+{
+	if(!init())
+	{
+		printf("Failed to initialize!\n");
+	}
+	else
+	{
+		if(!loadMedia())
+		{
+			printf("Failed to load media!\n");
+		}
+		else
+		{
+			//Score text
+			std::string scoreText = "0";
+			SDL_Color scoreTextColor = { 0xFF, 0xFF, 0xFF, 0xFF };
+
+			//Ball
+			Ball ball;
+
+			//"AI" platform
+			Platform AIPlatform;
+			AIPlatform.x = 0;
+			AIPlatform.y = SCREEN_HEIGHT / 2 - AIPlatform.getAssetRect().w / 2;
+			int AIScore = 0;
+
+			//Player platform
+			Platform playerPlatform;
+			playerPlatform.x = SCREEN_WIDTH - playerPlatform.getAssetRect().w;
+			playerPlatform.y = SCREEN_HEIGHT / 2 - playerPlatform.getAssetRect().w / 2;
+			int playerScore = 0;
+
+			//Game loop
+			bool win = false;
+			bool quit = false;
+			SDL_Event e;
+
+			while(!quit)
+			{
+				while(SDL_PollEvent(&e) != 0)
+				{
+					if(e.type == SDL_QUIT)
+					{
+						quit = true;
+					}
+					playerPlatform.checkEvent(e);
+				}
+
+				//Clear screen
+				SDL_SetRenderDrawColor(g_renderer, 0x00, 0x00, 0x00, 0xFF);
+				SDL_RenderClear(g_renderer);
+				//Game logic
+				if(!win)
+				{
+					AIPlatform.calculateMove(ball.getY());
+					AIPlatform.move();
+					playerPlatform.move();
+					ball.move();
+					switch(ball.checkCollisions(AIPlatform, playerPlatform))
+					{
+					case noOneScores:
+						break;
+					case AIScores:
+						AIScore = AIScore + 1;
+						break;
+					case playerScores:
+						playerScore = playerScore + 1;
+						break;
+					}
+				}
+				//Render
+				scoreText = std::to_string(AIScore);
+				g_scoreTextTexture.loadFromRenderedText(scoreText.c_str(), scoreTextColor);
+				g_scoreTextTexture.render(2 * AIPlatform.getAssetRect().w, 2 * AIPlatform.getAssetRect().w);
+
+				scoreText = std::to_string(playerScore);
+				g_scoreTextTexture.loadFromRenderedText(scoreText.c_str(), scoreTextColor);
+				g_scoreTextTexture.render(SCREEN_WIDTH - 2 * AIPlatform.getAssetRect().w - g_scoreTextTexture.getWidth(), 2 * AIPlatform.getAssetRect().w);
+
+				g_assetsTexture.render(playerPlatform.x, playerPlatform.y, &playerPlatform.getAssetRect());
+
+				g_assetsTexture.render(AIPlatform.x, AIPlatform.y, &AIPlatform.getAssetRect());
+				if(!win) //don't render the ball if someone won, because it obscures text
+					g_assetsTexture.render(ball.getX() - ball.getRadius(), ball.getY() - ball.getRadius(), &ball.getAssetRect());
+				//Winning
+				if(AIScore >= WINNING_SCORE)
+				{
+					win = true;
+					g_scoreTextTexture.loadFromRenderedText("The AI won!", scoreTextColor);
+					g_scoreTextTexture.render(SCREEN_WIDTH / 2 - g_scoreTextTexture.getWidth() / 2, SCREEN_HEIGHT / 2 - g_scoreTextTexture.getHeight() / 2);
+				}
+				else if(playerScore >= WINNING_SCORE)
+				{
+					win = true;
+					g_scoreTextTexture.loadFromRenderedText("The Player won!", scoreTextColor);
+					g_scoreTextTexture.render(SCREEN_WIDTH / 2 - g_scoreTextTexture.getWidth() / 2, SCREEN_HEIGHT / 2 - g_scoreTextTexture.getHeight() / 2);
+				}
+				SDL_RenderPresent(g_renderer);
+			}
+		}
+	}
+
+	close();
+	return 0;
+}
